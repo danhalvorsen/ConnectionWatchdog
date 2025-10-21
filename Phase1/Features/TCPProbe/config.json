@@ -1,0 +1,8 @@
+{
+  "feature": "TcpProbe",
+  "interval": 10,
+  "telemetry": { "seq": "http://localhost:5341" },
+  "category": "Network.Probe",
+  "version": "1.0.0"
+}
+s

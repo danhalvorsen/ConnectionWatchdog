@@ -1,0 +1,7 @@
+{
+  "modules": ["TcpProbe", "TcpScan", "RouteTrace", "TcpStream"],
+  "telemetry": {
+    "seq": "http://localhost:5341",
+    "zipkin": "http://localhost:9411"
+  }
+}
