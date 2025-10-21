@@ -7,7 +7,7 @@
 #>
 
 # Load mutex helper
-. (Join-Path $PSScriptRoot 'async.lock.ps1')
+. (Join-Path $PSScriptRoot 'sync-lock.ps1')
 
 function Start-AsyncProcess {
     [CmdletBinding()]

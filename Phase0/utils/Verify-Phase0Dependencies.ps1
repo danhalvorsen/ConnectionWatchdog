@@ -1,102 +1,123 @@
-# ==============================================================
-# PHASE0 DEPENDENCY VERIFIER
-# --------------------------------------------------------------
-# Verifies all required Phase0 core and utility files before launch.
-# Works regardless of whether core or utils files are reorganized.
-# ==============================================================
+<#
+.SYNOPSIS
+  Verifies that all required Phase0 dependencies exist and validates
+  file integrity using a SHA256 hash baseline. Supports auto-generation
+  and controlled rebuild of the baseline.
+#>
 
 param(
-    [switch] $AutoLaunch
+    [switch]$AutoLaunch,
+    [switch]$RebuildBaseline
 )
 
-# --- Resolve Phase0 root -------------------------------------
-# Go one level up (out of Utils)
-$phase0Root = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
+$ErrorActionPreference = "Stop"
 
-Write-Host ""
-Write-Host "=============================================================="
+Write-Host "`n=============================================================="
 Write-Host "Verifying Phase0 Core Dependencies"
-Write-Host "Path: $phase0Root"
-Write-Host "=============================================================="
+# --- Resolve Phase0 root (works from any subfolder) ----------------------
+$scriptPath = Split-Path -Parent $MyInvocation.MyCommand.Path
+$maybeRoot  = Split-Path $scriptPath -Parent
+if (Test-Path (Join-Path $maybeRoot 'core')) {
+    $phaseRoot = $maybeRoot
+} else {
+    $phaseRoot = $scriptPath
+}
+Write-Host "Path: $phaseRoot"
+Write-Host "==============================================================`n"
 
-# --- Define expected files relative to Phase0 root ------------
-$requiredFiles = @(
+# --- Define required files -----------------------------------------------
+$required = @(
     "core/Phase0.All.ps1",
     "core/Phase0.Bootstrap.ps1",
+    "core/Phase0.Banner.ps1",
+    "core/Phase0.Log.ps1",
     "Utils/Dependencies.ps1",
     "Utils/Assert.ps1",
     "Utils/Process-Handling.ps1",
     "Utils/Dummy.ps1"
 )
 
-# --- Check for missing files ----------------------------------
+# --- Check for missing ---------------------------------------------------
 $missing = @()
-foreach ($file in $requiredFiles) {
-    $fullPath = Join-Path $phase0Root $file
-    if (-not (Test-Path $fullPath)) {
-        $missing += $file
-    }
+foreach ($file in $required) {
+    $full = Join-Path $phaseRoot $file
+    if (-not (Test-Path $full)) { $missing += $file }
 }
 
-if ($missing.Count -eq 0) {
-    Write-Host ""
-    Write-Host "✅ All required dependencies found." -ForegroundColor Green
-} else {
-    Write-Host ""
-    Write-Warning "Missing required files:"
-    foreach ($m in $missing) { Write-Host "  - $m" }
+if ($missing.Count -gt 0) {
+    Write-Warning "Missing required files:`n  - $($missing -join "`n  - ")"
+    Write-Host "`nCurrent directory contents:`n"
+    Get-ChildItem -Recurse -Path $phaseRoot | Select-Object FullName, Length, LastWriteTime
+    Write-Host "`nWARNING: Phase0 launch aborted due to missing dependencies."
+    return
 }
 
-# --- Display file summary -------------------------------------
-Write-Host ""
-Write-Host "Current directory contents:"
-Get-ChildItem -Path $phase0Root -Recurse -File |
-    Select-Object FullName, Length, LastWriteTime |
-    Sort-Object FullName |
-    Format-Table -AutoSize
+Write-Host "✅ All required dependencies found.`n"
 
-# --- Integrity baseline (hash file) ----------------------------
-$hashFile = Join-Path $phase0Root "phase0.hash.json"
+# --- Hash verification ---------------------------------------------------
+$hashFile = Join-Path $phaseRoot "phase0.hash.json"
+$scriptFiles = Get-ChildItem -Path $phaseRoot -Recurse -Include *.ps1
+$hashes = @{}
 
-if (Test-Path $hashFile) {
-    Write-Host ""
-    Write-Host "Existing integrity baseline found (phase0.hash.json):"
-    try {
-        $stored = Get-Content $hashFile | ConvertFrom-Json
-        foreach ($key in $stored.PSObject.Properties.Name) {
-            $val = $stored.$key
-            Write-Host "  $key -> $val"
-        }
-    } catch {
-        Write-Warning "Failed to parse hash baseline."
-    }
-} else {
-    Write-Host ""
-    Write-Warning "No hash baseline found (phase0.hash.json will be created at first run)."
+foreach ($f in $scriptFiles) {
+    $hash = (Get-FileHash $f.FullName -Algorithm SHA256).Hash
+    $relPath = $f.FullName.Substring($phaseRoot.Length + 1)
+    $hashes[$relPath] = $hash
 }
 
-# --- Optional AutoLaunch --------------------------------------
-if ($missing.Count -eq 0 -and $AutoLaunch) {
-    Write-Host ""
-    Write-Host "AutoLaunch enabled. Bootstrapping Phase0..." -ForegroundColor Yellow
+function Save-Baseline {
+    param($hashDict, $target)
+    $hashDict | ConvertTo-Json -Depth 3 | Out-File -FilePath $target -Encoding UTF8
+}
 
-    $bootstrapPath = Join-Path $phase0Root "core\Phase0.Bootstrap.ps1"
-    if (Test-Path $bootstrapPath) {
-        & $bootstrapPath
+if ($RebuildBaseline -or -not (Test-Path $hashFile)) {
+    if ($RebuildBaseline) {
+        Write-Host "Rebuilding hash baseline..." -ForegroundColor Cyan
     } else {
-        Write-Warning "Bootstrap script not found at: $bootstrapPath"
+        Write-Warning "No hash baseline found. Creating $hashFile ..."
     }
-}
-elseif ($missing.Count -eq 0) {
-    Write-Host ""
-    Write-Host "You can now safely launch Phase0 manually via core\Phase0.Bootstrap.ps1" -ForegroundColor Cyan
+    Save-Baseline $hashes $hashFile
+    Write-Host "✅ Baseline created successfully.`n"
 }
 else {
-    Write-Host ""
-    Write-Warning "Phase0 launch aborted due to missing dependencies."
+    $existing = Get-Content $hashFile | ConvertFrom-Json
+    $changed = @()
+
+    foreach ($key in $hashes.Keys) {
+        if (-not $existing.ContainsKey($key)) {
+            $changed += "NEW: $key"
+        } elseif ($existing[$key] -ne $hashes[$key]) {
+            $changed += "MODIFIED: $key"
+        }
+    }
+
+    foreach ($key in $existing.Keys) {
+        if (-not $hashes.ContainsKey($key)) {
+            $changed += "REMOVED: $key"
+        }
+    }
+
+    if ($changed.Count -gt 0) {
+        Write-Warning "Detected modified or new files:`n  - $($changed -join "`n  - ")"
+        Write-Host "Updating baseline..."
+        Save-Baseline $hashes $hashFile
+        Write-Host "✅ Hash baseline updated.`n"
+    } else {
+        Write-Host "✅ All file hashes match baseline.`n"
+    }
 }
 
-Write-Host ""
-Write-Host "=============================================================="
-Write-Host "Phase0 verification completed at $(Get-Date -Format u)"
-Write-Host "=============================================================="
+# --- Optional AutoLaunch -------------------------------------------------
+if ($AutoLaunch) {
+    Write-Host "AutoLaunch enabled. Bootstrapping Phase0..."
+    $bootstrap = Join-Path $phaseRoot "core\Phase0.Bootstrap.ps1"
+    if (Test-Path $bootstrap) {
+        & $bootstrap
+    } else {
+        Write-Warning "Bootstrap script not found at $bootstrap"
+    }
+}
+
+Write-Host "`n=============================================================="
+Write-Host "Phase0 verification completed at $(Get-Date -Format "yyyy-MM-dd HH:mm:ssZ")"
+Write-Host "==============================================================`n"
